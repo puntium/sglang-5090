@@ -474,6 +474,26 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
             )
         )
 
+    def _forward_extend_uses_xqa_fp4_verify(self, forward_batch: ForwardBatch) -> bool:
+        """Whether this extend-family call is TARGET_VERIFY over packed NVFP4
+        on XQA (SM90/SM120).
+
+        XQA has no native FP4 prefill, but its decode kernel takes several
+        query tokens per request, so verify reads the packed cache and block
+        scales the same way single-token decode does, with BF16 Q/O.
+        """
+        if not (
+            self.is_xqa_impl and self.is_nvfp4_kvcache and self.decode_uses_native_fp4
+        ):
+            return False
+        if not forward_batch.forward_mode.is_target_verify():
+            raise RuntimeError(
+                "TRTLLM MHA with native FP4 KV cache on XQA supports decode and "
+                "speculative verify only; use a separate prefill backend such "
+                "as flashinfer."
+            )
+        return True
+
     def _finalize_nvfp4_output(
         self, output: torch.Tensor, forward_batch: ForwardBatch
     ) -> torch.Tensor:
@@ -1554,6 +1574,9 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
         cache_loc = forward_batch.out_cache_loc
         cp_active = is_cp_active(forward_batch)
         uses_native_fp4 = self._forward_extend_uses_native_fp4(forward_batch)
+        reads_packed_fp4 = uses_native_fp4 or self._forward_extend_uses_xqa_fp4_verify(
+            forward_batch
+        )
         if uses_native_fp4 and cp_active:
             raise NotImplementedError(
                 "Native NVFP4 TRT-LLM prefill does not yet support context parallelism."
@@ -1617,7 +1640,7 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
             or forward_batch.forward_mode.is_draft_extend_v2()
         )
 
-        if uses_native_fp4:
+        if reads_packed_fp4:
             kv_cache, kv_cache_block_scales = self._get_nvfp4_decode_kv_cache(layer)
             k_cache, v_cache = kv_cache
         else:
@@ -1643,7 +1666,7 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
             kv_cache_block_scales = None
         # sink: additional value per head in the denominator of the softmax.
         attention_sink = kwargs.get("sinks", None)
-        if uses_native_fp4:
+        if reads_packed_fp4:
             k_scale, v_scale = self._get_nvfp4_bmm_scales(layer)
             bmm1_scale = q_scale * k_scale * layer.scaling
             bmm2_scale = v_scale
