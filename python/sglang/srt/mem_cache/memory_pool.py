@@ -2878,6 +2878,8 @@ class MHATokenToKVPool(KVCache):
             return [int(value) for value in values.cpu().tolist()]
         return [int(value) for value in values]
 
+    DEQUANT_PREFIX_SLICE_TOKENS = 16384
+
     def _prepare_dequant_extend_workspace(
         self,
         layer_id: int,
@@ -2908,8 +2910,12 @@ class MHATokenToKVPool(KVCache):
             prev_len = int(extend_prefix_lens_cpu[i])
             extend_len = int(extend_seq_lens_cpu[i])
 
-            if prev_len > 0:
-                prev_indices = req_to_token[req_idx, :prev_len]
+            # Dequantize the prefix in bounded slices. The gathered FP4 rows and
+            # the BF16 intermediate cost about 7 KiB per token, which for a long
+            # prefix is more transient memory than the pool leaves free.
+            for start in range(0, prev_len, self.DEQUANT_PREFIX_SLICE_TOKENS):
+                end = min(start + self.DEQUANT_PREFIX_SLICE_TOKENS, prev_len)
+                prev_indices = req_to_token[req_idx, start:end]
                 k_prev_fp8, v_prev_fp8 = self.quant_method.dequantize_prev_kv(
                     k_fp4[prev_indices],
                     k_scales[prev_indices],
@@ -2917,8 +2923,9 @@ class MHATokenToKVPool(KVCache):
                     v_scales[prev_indices],
                     global_layer_id,
                 )
-                dq_k[cur_token_idx_dq : cur_token_idx_dq + prev_len] = k_prev_fp8
-                dq_v[cur_token_idx_dq : cur_token_idx_dq + prev_len] = v_prev_fp8
+                dq_k[cur_token_idx_dq + start : cur_token_idx_dq + end] = k_prev_fp8
+                dq_v[cur_token_idx_dq + start : cur_token_idx_dq + end] = v_prev_fp8
+                del k_prev_fp8, v_prev_fp8
 
             if k_cur_fp8 is not None:
                 cur_end = cur_batch_start_loc_cpu + extend_len

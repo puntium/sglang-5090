@@ -1062,6 +1062,15 @@ class Scheduler(
 
     def init_memory_pools(self):
         """Allocate KV cache pools for target and draft workers."""
+        # Share the target's embeddings and LM head with the draft before the
+        # pools are sized. The draft otherwise still holds its own copy while
+        # the KV budget is profiled, and that memory is only freed afterwards.
+        eagle_worker = getattr(self.draft_worker, "draft_worker", None)
+        if hasattr(eagle_worker, "init_token_map") and hasattr(
+            eagle_worker, "init_lm_head"
+        ):
+            eagle_worker.init_token_map()
+            eagle_worker.init_lm_head()
         self.init_target_memory_pool()
         # Lands the retraction backend on the disagg bag before the draft
         # worker's HiCache plan reads it.
