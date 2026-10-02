@@ -273,7 +273,16 @@ class BaseSpecWorker(ABC):
                 "HiCache does not support Inkling MTP draft state yet."
             )
 
-        if _can_pack_hicache_mtp(spec_algorithm, draft_runners):
+        from sglang.srt.mem_cache.pool_host.mha_fp4 import has_block_scaled_fp4_rows
+
+        # Packing puts the draft's KV layers in the target's host tensor, which
+        # needs rows of one width. A block-scaled FP4 target packs its rows, so
+        # its draft takes the sidecar path below.
+        target_kv_pool = target_model_runner.token_to_kv_pool
+        packs_with_target = not has_block_scaled_fp4_rows(
+            getattr(target_kv_pool, "full_kv_pool", target_kv_pool)
+        )
+        if packs_with_target and _can_pack_hicache_mtp(spec_algorithm, draft_runners):
             target_model_runner.mtp_draft_device_pools = draft_pools
             return HiCacheDraftPlan(
                 mode=HiCacheDraftMode.PACKED,

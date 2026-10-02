@@ -1511,10 +1511,18 @@ def get_mha_host_pool_cls(device_pool: MHATokenToKVPool) -> type:
     """Pick the right MHA host-pool class based on the device pool's K/V dims.
 
     Returns ``MHATokenToKVPoolMXFP8Host`` for the block-scaled MXFP8 pool (its
-    UE8M0 scales must travel with the payload),
+    UE8M0 scales must travel with the payload), ``MHATokenToKVPoolFP4Host``
+    for a quantized pool with packed FP4 rows and block scales,
     ``AsymmetricMHATokenToKVPoolHost`` when ``head_dim != v_head_dim``
     (e.g. MiMo-V2), else the default ``MHATokenToKVPoolHost``.
     """
+    from sglang.srt.mem_cache.pool_host.mha_fp4 import (
+        MHATokenToKVPoolFP4Host,
+        has_block_scaled_fp4_rows,
+    )
+
+    if has_block_scaled_fp4_rows(device_pool):
+        return MHATokenToKVPoolFP4Host
     if isinstance(device_pool, MHATokenToKVPoolMXFP8):
         if device_pool.head_dim != device_pool.v_head_dim:
             raise NotImplementedError(
